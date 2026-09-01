@@ -1,0 +1,1 @@
+print("Solidity is interesting")
