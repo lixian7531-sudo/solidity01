@@ -6,3 +6,6 @@ venv_py36/
 
 # Environment variables / secrets
 .env
+
+# 对话历史
+history/
