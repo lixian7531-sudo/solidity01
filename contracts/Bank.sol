@@ -43,10 +43,10 @@ contract Bank {
         revert("unsupported call");
     }
 
-    /// @notice 只有管理员可以提取合约中的全部 ETH
-    function withdraw() external onlyAdmin {
-        uint256 amount = address(this).balance;
-        require(amount > 0, "no ETH to withdraw");
+    /// @notice 只有管理员可以提取合约中的 ETH（amount 须大于 0 且不超过合约余额）
+    function withdraw(uint256 amount) external onlyAdmin {
+        require(amount > 0, "withdraw amount must be > 0");
+        require(amount <= address(this).balance, "insufficient balance");
 
         (bool ok, ) = payable(admin).call{value: amount}("");
         require(ok, "withdraw failed");
