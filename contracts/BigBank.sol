@@ -1,15 +1,33 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
+/// @title IBank
+/// @notice Bank / BigBank 对外暴露的统一接口
+interface IBank {
+    /// @notice 存款：调用时需附带 ETH
+    function deposit() external payable;
+
+    /// @notice 管理员取款
+    function withdraw(uint256 amount) external;
+
+    /// @notice 查询当前管理员
+    function admin() external view returns (address);
+
+    /// @notice 查询某个地址的累计存款
+    function balances(address account) external view returns (uint256);
+
+    /// @notice 查询存款前 3 名
+    function getTop3() external view returns (address[3] memory, uint256[3] memory);
+}
+
 /// @title Bank
 /// @notice 存款合约：记录每个地址的累计存款金额，并维护存款金额前 3 名。
-///         单个 .sol 文件，可直接在 Remix 中编译部署。
-contract Bank {
+contract Bank is IBank {
     // 管理员：合约部署者
-    address public admin;
+    address public override admin;
 
     // 每个地址的累计存款金额（单位：wei）
-    mapping(address => uint256) public balances;
+    mapping(address => uint256) public override balances;
 
     // 存款金额前 3 名：topDepositors[i] 与 topAmounts[i] 一一对应
     address[3] public topDepositors;
@@ -27,27 +45,25 @@ contract Bank {
         admin = msg.sender;
     }
 
-    /// @notice 在 Remix 中调用本函数，并在 VALUE 栏填入 ETH 即可存款；
-    ///         直接用 MetaMask 向合约地址转账也会自动走 receive()，效果相同。
-    /// @dev    标记为 virtual，允许 BigBank 重写以追加最低存款额限制。
-    function deposit() public payable virtual {
+    /// @notice 存款入口：VALUE 栏填 ETH 后调用即可。
+    /// @dev    实现 IBank.deposit，并标记 virtual 供 BigBank 重写。
+    function deposit() public payable virtual override {
         _deposit();
     }
 
-    /// @notice 接收纯 ETH 转账（MetaMask 直接转给合约地址时触发）
-    /// @dev    标记为 virtual，允许 BigBank 重写以追加最低存款额限制，
-    ///         否则纯 ETH 转账会绕过 BigBank 的限制直接进入 _deposit()。
+    /// @notice 接收纯 ETH 转账（MetaMask 直转时触发），同样记账。
+    /// @dev    标记 virtual 供 BigBank 重写，避免直转绕过最低存款限制。
     receive() external payable virtual {
         _deposit();
     }
 
-    /// @notice 拒绝其它未知调用，避免误调用造成 ETH 丢失
+    /// @notice 拒绝其它未知调用
     fallback() external {
         revert("unsupported call");
     }
 
-    /// @notice 只有管理员可以提取合约中的 ETH（amount 须大于 0 且不超过合约余额）
-    function withdraw(uint256 amount) external onlyAdmin {
+    /// @notice 只有管理员可以提取合约中的 ETH（实现 IBank.withdraw）
+    function withdraw(uint256 amount) external override onlyAdmin {
         require(amount > 0, "withdraw amount must be > 0");
         require(amount <= address(this).balance, "insufficient balance");
 
@@ -58,7 +74,12 @@ contract Bank {
     }
 
     /// @notice 返回存款前 3 名的地址与金额
-    function getTop3() external view returns (address[3] memory, uint256[3] memory) {
+    function getTop3()
+        external
+        view
+        override
+        returns (address[3] memory, uint256[3] memory)
+    {
         return (topDepositors, topAmounts);
     }
 
@@ -72,9 +93,7 @@ contract Bank {
         emit Deposited(msg.sender, msg.value);
     }
 
-    /// @notice 增量维护前 3 名。
-    /// 存款只会增加余额、不会减少，因此只需把“原有前 3 名 + 本次存款人”
-    /// （最多 4 个候选地址）按余额重新排序，取前 3 即可。
+    /// @notice 增量维护前 3 名：把"原前 3 名 + 本次存款人"（最多 4 个）重新排序
     function _updateTop3(address account) internal {
         address[4] memory candidates;
         uint256 count = 0;
@@ -135,89 +154,32 @@ contract Bank {
 }
 
 /// @title BigBank
-/// @notice 继承 Bank：仅允许单次存款金额 > 0.001 ether，
-///         并支持把管理员（admin）转移给 Admin 合约。
+/// @notice 继承 Bank，附加要求：
+///         1) 单次存款金额必须 > 0.001 ether（modifier 控制）；
+///         2) 支持转移管理员。
 contract BigBank is Bank {
     event AdminTransferred(address indexed oldAdmin, address indexed newAdmin);
 
-    /// @notice 最低存款限制：本次随调用附带的 ETH 必须严格大于 0.001 ether
+    /// @notice 最低存款限制：本次调用附带的 ETH 必须严格大于 0.001 ether
     modifier onlyMinDeposit() {
         require(msg.value > 0.001 ether, "deposit must be > 0.001 ether");
         _;
     }
 
-    /// @notice 通过函数存款（VALUE 栏必须 > 0.001 ether）
+    /// @notice 重写存款入口，加上最低存款检查
     function deposit() public payable override onlyMinDeposit {
         _deposit();
     }
 
-    /// @notice 直接向合约地址转 ETH 同样受最低存款额限制
+    /// @notice 重写 receive，MetaMask 直转同样受最低存款限制
     receive() external payable override onlyMinDeposit {
         _deposit();
     }
 
-    /// @notice 只有当前管理员可以把 admin 转移给 Admin 合约
+    /// @notice 只有当前管理员可以把 admin 转移给其它合约/地址
     function transferAdmin(address newAdmin) external onlyAdmin {
         require(newAdmin != address(0), "new admin cannot be zero address");
         emit AdminTransferred(admin, newAdmin);
         admin = newAdmin;
-    }
-}
-
-/// @title Admin
-/// @notice 被指定为 BigBank 的管理员（admin）后，由 Admin 合约调用
-///         BigBank.withdraw()；收到的 ETH 暂存在本合约，owner 可再转出。
-contract Admin {
-    address public owner;
-
-    event OwnershipTransferred(address indexed previousOwner, address indexed newOwner);
-    event EthWithdrawn(address indexed to, uint256 amount);
-
-    modifier onlyOwner() {
-        require(msg.sender == owner, "only owner can call");
-        _;
-    }
-
-    constructor() {
-        owner = msg.sender;
-    }
-
-    /// @notice 必须存在 payable receive，否则 BigBank.withdraw()
-    ///         用 call{value: amount} 向 Admin 转账会失败并整体回滚
-    receive() external payable {}
-
-    /// @notice 以银行管理员身份调用 Bank/BigBank 的 withdraw()，
-    ///         把 ETH 从银行取到 Admin 合约（注意：不是直接到 owner 账户）
-    function withdrawFromBank(Bank bank, uint256 amount) external onlyOwner {
-        bank.withdraw(amount);
-    }
-
-    /// @notice 把 Admin 合约中指定数量的 ETH 转给 owner
-    function withdrawETH(uint256 amount) external onlyOwner {
-        require(amount > 0, "withdraw amount must be > 0");
-        require(amount <= address(this).balance, "insufficient balance");
-
-        (bool ok, ) = payable(owner).call{value: amount}("");
-        require(ok, "transfer failed");
-
-        emit EthWithdrawn(owner, amount);
-    }
-
-    /// @notice 把 Admin 合约中的 ETH 全部转给 owner
-    function withdrawAllETH() external onlyOwner {
-        uint256 balance = address(this).balance;
-        require(balance > 0, "no balance to withdraw");
-
-        (bool ok, ) = payable(owner).call{value: balance}("");
-        require(ok, "transfer failed");
-
-        emit EthWithdrawn(owner, balance);
-    }
-
-    /// @notice owner 可以把 Admin 合约的控制权转给其它地址
-    function transferOwnership(address newOwner) external onlyOwner {
-        require(newOwner != address(0), "new owner cannot be zero address");
-        emit OwnershipTransferred(owner, newOwner);
-        owner = newOwner;
     }
 }
