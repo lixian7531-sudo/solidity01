@@ -29,3 +29,5 @@ contract TestVariable{
     function setData(uint a) internal { data = a; }
     uint public data;
 }
+
+
